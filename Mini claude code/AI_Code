@@ -1,11 +1,32 @@
+
 import json
+import os
+from pathlib import Path
+
 from openai import OpenAI
 
-client = OpenAI()
+# Set your OPENAI_API_KEY environment variable before running.
+client = OpenAI(api_key=("Enter API"))
+
+MODEL = "gpt-5-mini"
+
+# Files are read relative to this script's directory.
+BASE_DIR = Path(__file__).resolve().parent
+WORKSPACE = (BASE_DIR / "Mini claude code").resolve()
+
 
 def read_file(path):
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read()
+    """Read a text file inside the workspace."""
+    file_path = (WORKSPACE / path).resolve()
+
+    # Prevent reading files outside the workspace.
+    if not file_path.is_relative_to(WORKSPACE):
+        raise ValueError("Access outside the workspace is not allowed.")
+
+    if not file_path.is_file():
+        raise FileNotFoundError(f"File not found: {path}")
+
+    return file_path.read_text(encoding="utf-8")
 
 
 TOOL_SCHEMAS = [
@@ -13,44 +34,118 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read a text file and return its contents.",
+            "description": "Read a text file when the user asks about its contents.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Path of the file to read."}
+                    "path": {
+                        "type": "string",
+                        "description": "File path relative to the workspace."
+                    }
                 },
                 "required": ["path"],
+                "additionalProperties": False
             },
         },
     },
 ]
 
-messages = [
-    {
-        "role": "user","content": "What is inside notes.txt? Summarize it in one line."},
-]
+TOOLS = {
+    "read_file": read_file,
+}
+
+SYSTEM_PROMPT = f"""
+You are a capable AI assistant and coding agent.
+
+You can answer normal questions, explain code, and help solve
+programming problems.
+
+You have a read_file tool for reading files in this workspace:
+{WORKSPACE}
+
+When the user asks about a file, use read_file to inspect it
+before answering. Use the actual tool results as evidence.
+Do not claim to have read a file unless the tool succeeded.
+Keep answers helpful and clear.
+"""
 
 
-while True:
-    response = client.chat.completions.create(
-        model="gpt-5-mini",
-        messages=messages,
-        tools=TOOL_SCHEMAS,
-    )
-    message = response.choices[0].message
-    print(message)
-    messages.append(message)
+def run_agent(messages):
+    """Keep calling the model until it returns a final answer."""
+    for _ in range(10):
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=messages,
+            tools=TOOL_SCHEMAS,
+        )
 
-    # No tool calls means the model is done and gave us a normal answer
-    if not message.tool_calls:
-        print(message.content)
-        break
+        message = response.choices[0].message
+        messages.append(message)
 
-    for tool_call in message.tool_calls:
-        args = json.loads(tool_call.function.arguments)
-        print(f"Model wants to run: read_file({args})")
+        # The model has finished responding.
+        if not message.tool_calls:
+            return message.content or "The AI returned an empty response."
 
-        result = read_file("Mini claude code/" + args["path"])
+        # Execute each requested tool and return its result.
+        for tool_call in message.tool_calls:
+            name = tool_call.function.name
 
-        
-        messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": result,})
+            try:
+                args = json.loads(tool_call.function.arguments or "{}")
+                function = TOOLS.get(name)
+
+                if function is None:
+                    result = f"Unknown tool: {name}"
+                else:
+                    print(f"[Using tool: {name}]")
+                    result = function(**args)
+
+            except Exception as error:
+                result = f"Tool error: {type(error).__name__}: {error}"
+
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": str(result),
+            })
+
+    return "Stopped after 10 tool rounds to prevent an endless loop."
+
+
+def main():
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT}
+    ]
+
+    print("AI agent ready. Type 'exit' or 'quit' to stop.")
+    print(f"Workspace: {WORKSPACE}")
+
+    while True:
+        try:
+            user_input = input("\nYou: ").strip()
+
+            if user_input.lower() in ("exit", "quit"):
+                print("Goodbye!")
+                break
+
+            if not user_input:
+                continue
+
+            messages.append({
+                "role": "user",
+                "content": user_input,
+            })
+
+            answer = run_agent(messages)
+            print(f"\nAI: {answer}")
+
+        except KeyboardInterrupt:
+            print("\nGoodbye!")
+            break
+
+        except Exception as error:
+            print(f"\nAPI error: {type(error).__name__}: {error}")
+
+
+if __name__ == "__main__":
+    main()
