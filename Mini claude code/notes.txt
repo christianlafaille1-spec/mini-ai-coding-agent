@@ -1,2 +1,0 @@
-Christian is learning Python and building an AI chatbot.
-He wants his chatbot to read files and summarize them.
