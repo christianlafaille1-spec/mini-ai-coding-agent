@@ -1,78 +1,142 @@
-
 import json
 import os
-from pathlib import Path
-
+import subprocess
 from openai import OpenAI
 
-# Set your OPENAI_API_KEY environment variable before running.
-client = OpenAI(api_key=("Enter API"))
-
+client = OpenAI(api_key="Import_API")
 MODEL = "gpt-5-mini"
 
-# Files are read relative to this script's directory.
-BASE_DIR = Path(__file__).resolve().parent
-WORKSPACE = (BASE_DIR / "Mini claude code").resolve()
+SYSTEM_PROMPT = """You are a coding agent running in the user's terminal.
+You can list files, read files, write files, and run shell commands.
+Use your tools to complete the user's task, then briefly summarize what you did.
+The working directory is the folder the user launched you from."""
+
+
+def list_files(path="."):
+    entries = []
+    for entry in os.scandir(path):
+        entries.append(entry.name + ("/" if entry.is_dir() else ""))
+    return "\n".join(sorted(entries)) or "(empty directory)"
 
 
 def read_file(path):
-    """Read a text file inside the workspace."""
-    file_path = (WORKSPACE / path).resolve()
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
 
-    # Prevent reading files outside the workspace.
-    if not file_path.is_relative_to(WORKSPACE):
-        raise ValueError("Access outside the workspace is not allowed.")
 
-    if not file_path.is_file():
-        raise FileNotFoundError(f"File not found: {path}")
+def write_file(path, content):
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+    return f"Saved {path} ({len(content)} characters)"
 
-    return file_path.read_text(encoding="utf-8")
+
+def run_command(command):
+    answer = input(f"Run '{command}'? [y/N] ")
+    if answer.strip().lower() != "y":
+        return "The user declined to run this command."
+    result = subprocess.run(
+        command, shell=True, capture_output=True, text=True, timeout=120
+    )
+    output = (result.stdout + result.stderr).strip()
+    return output or f"(no output, exit code {result.returncode})"
+
+TOOLS = {
+    "list_files": list_files,
+    "read_file": read_file,
+    "write_file": write_file,
+    "run_command": run_command
+}
+
 
 
 TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "read_file",
-            "description": "Read a text file when the user asks about its contents.",
+            "name": "list_files",
+            "description": "List files and directories in a folder.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "File path relative to the workspace."
+                        "description": "Path of the directory to list."
                     }
                 },
                 "required": ["path"],
-                "additionalProperties": False
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Read a text file and return its contents.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path of the file to read."
+                    }
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": "Write content to a text file.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path of the file to write."
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Content to write into the file."
+                    }
+                },
+                "required": ["path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_command",
+            "description": "Run a shell command after asking the user for permission.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The shell command to run."
+                    }
+                },
+                "required": ["command"],
             },
         },
     },
 ]
 
-TOOLS = {
-    "read_file": read_file,
-}
 
-SYSTEM_PROMPT = f"""
-You are a capable AI assistant and coding agent.
-
-You can answer normal questions, explain code, and help solve
-programming problems.
-
-You have a read_file tool for reading files in this workspace:
-{WORKSPACE}
-
-When the user asks about a file, use read_file to inspect it
-before answering. Use the actual tool results as evidence.
-Do not claim to have read a file unless the tool succeeded.
-Keep answers helpful and clear.
-"""
+def run_tool(tool_call):
+    name = tool_call.function.name
+    args = json.loads(tool_call.function.arguments)
+    print(f"  tool: {name}({args})")
+    try:
+        return str(TOOLS[name](**args))
+    except Exception as error:
+        return f"Error: {error}"
 
 
 def run_agent(messages):
-    """Keep calling the model until it returns a final answer."""
-    for _ in range(10):
+    while True:
         response = client.chat.completions.create(
             model=MODEL,
             messages=messages,
@@ -82,70 +146,31 @@ def run_agent(messages):
         message = response.choices[0].message
         messages.append(message)
 
-        # The model has finished responding.
         if not message.tool_calls:
-            return message.content or "The AI returned an empty response."
+            return message.content or ""
 
-        # Execute each requested tool and return its result.
         for tool_call in message.tool_calls:
-            name = tool_call.function.name
-
-            try:
-                args = json.loads(tool_call.function.arguments or "{}")
-                function = TOOLS.get(name)
-
-                if function is None:
-                    result = f"Unknown tool: {name}"
-                else:
-                    print(f"[Using tool: {name}]")
-                    result = function(**args)
-
-            except Exception as error:
-                result = f"Tool error: {type(error).__name__}: {error}"
+            result = run_tool(tool_call)
 
             messages.append({
                 "role": "tool",
                 "tool_call_id": tool_call.id,
-                "content": str(result),
+                "content": result,
             })
 
-    return "Stopped after 10 tool rounds to prevent an endless loop."
 
 
 def main():
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT}
-    ]
-
-    print("AI agent ready. Type 'exit' or 'quit' to stop.")
-    print(f"Workspace: {WORKSPACE}")
-
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    print("Mini agent ready. Type 'exit' to quit.")
     while True:
-        try:
-            user_input = input("\nYou: ").strip()
-
-            if user_input.lower() in ("exit", "quit"):
-                print("Goodbye!")
-                break
-
-            if not user_input:
-                continue
-
-            messages.append({
-                "role": "user",
-                "content": user_input,
-            })
-
-            answer = run_agent(messages)
-            print(f"\nAI: {answer}")
-
-        except KeyboardInterrupt:
-            print("\nGoodbye!")
+        user_input = input("\nYou: ")
+        if user_input.strip().lower() in ("exit", "quit"):
             break
-
-        except Exception as error:
-            print(f"\nAPI error: {type(error).__name__}: {error}")
+        messages.append({"role": "user", "content": user_input})
+        reply = run_agent(messages)
+        print(f"\nAgent: {reply}")
 
 
 if __name__ == "__main__":
-    main()
+    main() 
