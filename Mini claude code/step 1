@@ -53,5 +53,4 @@ while True:
         result = read_file("Mini claude code/" + args["path"])
 
         
-        messages.append({
-            "role": "tool", "tool_call_id": tool_call.id, "content": result,})
+        messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": result,})
